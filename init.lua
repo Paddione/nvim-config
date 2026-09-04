@@ -31,6 +31,8 @@ vim.g.mapleader = ' '
 vim.g.maplocalleader = '\\'
 
 -- ── Plugin Spec ──────────────────────────────────────────────────────────────
+local llm = require('llm')
+
 require('lazy').setup({
   -- ── Theme ────────────────────────────────────────────────────────────────
   {
@@ -86,45 +88,34 @@ require('lazy').setup({
             title = 'Local LLM & Inference Backends',
             padding = 1,
             function()
-              local uv = vim.uv or vim.loop
-              local function probe(port)
-                local s = uv.new_tcp()
-                if not s then return false end
-                local ok = false
-                local waiting = true
-                s:connect('127.0.0.1', port, function(err)
-                  ok = not err
-                  waiting = false
-                  s:close()
-                end)
-                local start = uv.now()
-                while waiting and (uv.now() - start < 60) do
-                  uv.run('nowait')
-                end
-                if waiting then
-                  pcall(function() s:close() end)
-                end
-                return ok
+              local backends = llm.dashboard_backends()
+              local ports = {}
+              for _, b in ipairs(backends) do
+                table.insert(ports, b.port)
               end
 
-              local backends = {
-                { name = 'LM Studio (Local Models)', port = 1234, key = '1' },
-                { name = 'FreeToken Native / MoE', port = 1919, key = '2' },
-                { name = 'FreeToken Daemon', port = 1900, key = '3' },
-                { name = 'LLM Proxy (Local Gateway)', port = 18235, key = '4' },
-                { name = 'OpenCode Server', port = 4096, key = '5' },
-                { name = 'BGE Embedding Gateway', port = 8081, key = '6' },
-                { name = 'BGE Reranker Gateway', port = 8093, key = '7' },
-                { name = 'Unsloth Studio & Cloudflare', port = 8888, key = '8' },
-              }
+              -- Asynchrones Probing im Hintergrund anstoßen
+              llm.probe_all(ports, function(results)
+                local changed = false
+                for p, ok in pairs(results) do
+                  if llm.last_status[p] ~= ok then
+                    llm.last_status[p] = ok
+                    changed = true
+                  end
+                end
+                if changed then
+                  pcall(function() Snacks.dashboard.update() end)
+                end
+              end)
 
               local items = {}
               for _, b in ipairs(backends) do
-                local online = probe(b.port)
-                local icon = online and '● ' or '○ '
-                local hl_icon = online and 'DiagnosticOk' or 'Comment'
-                local status_text = online and ' ONLINE ' or 'OFFLINE '
-                local hl_status = online and 'DashboardBadgeOnline' or 'DashboardBadgeOffline'
+                local status = llm.last_status[b.port]
+                local online = status == true
+                local icon = (status == nil) and '◌ ' or (online and '● ' or '○ ')
+                local hl_icon = (status == nil) and 'Comment' or (online and 'DiagnosticOk' or 'Comment')
+                local status_text = (status == nil) and 'PROBING' or (online and ' ONLINE ' or 'OFFLINE ')
+                local hl_status = (status == nil) and 'Comment' or (online and 'DashboardBadgeOnline' or 'DashboardBadgeOffline')
 
                 table.insert(items, {
                   icon = { icon, hl = hl_icon },
@@ -135,9 +126,11 @@ require('lazy').setup({
                     { string.format(' [%s]', status_text), hl = hl_status },
                   },
                   action = function()
+                    local curr = llm.last_status[b.port]
+                    local txt = (curr == nil) and 'wird geprüft...' or (curr and 'ONLINE' or 'OFFLINE')
                     vim.notify(
-                      string.format('%s on port %d is %s (http://127.0.0.1:%d)', b.name, b.port, status_text:gsub('%s+', ''), b.port),
-                      online and vim.log.levels.INFO or vim.log.levels.WARN,
+                      string.format('%s on port %d is %s (http://127.0.0.1:%d)', b.name, b.port, txt, b.port),
+                      curr and vim.log.levels.INFO or vim.log.levels.WARN,
                       { title = 'Backend Probe' }
                     )
                   end,
@@ -150,6 +143,17 @@ require('lazy').setup({
             icon = '⚡ ',
             title = 'Quick Actions & Control',
             padding = 1,
+            {
+              icon = { '󰚩 ', hl = 'SnacksDashboardIcon' },
+              key = 's',
+              desc = {
+                { 'Switch LLM Loadout (VRAM gate)', hl = 'SnacksDashboardDesc', width = 31 },
+                { ' [:LlmSwitch]', hl = 'Comment' },
+              },
+              action = function()
+                llm.switch()
+              end,
+            },
             {
               icon = { '󰒲 ', hl = 'SnacksDashboardIcon' },
               key = 'p',
@@ -525,6 +529,15 @@ vim.opt.list = true
 vim.opt.listchars = { tab = '│ ', trail = '·', nbsp = '␣' }
 
 -- ── Completion ───────────────────────────────────────────────────────────────
+-- ── LLM Control Commands ──────────────────────────────────────────────────
+vim.api.nvim_create_user_command('LlmSwitch', function()
+  require('llm').switch()
+end, { desc = 'Switch LLM Loadout with exclusivity and VRAM check' })
+
+vim.api.nvim_create_user_command('LlmStatus', function()
+  require('llm').status()
+end, { desc = 'Show GPU VRAM and active inference backends' })
+
 vim.api.nvim_create_autocmd('FileType', {
   pattern = { 'json', 'jsonc', 'yaml', 'toml' },
   callback = function()
